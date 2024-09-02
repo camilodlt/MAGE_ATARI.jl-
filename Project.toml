@@ -6,7 +6,6 @@ version = "1.0.0-DEV"
 [deps]
 ArcadeLearningEnvironment = "b7f77d8d-088d-5e02-8ac0-89aab2acc977"
 AtariAlgos = "faabce77-3242-5060-abab-4a4767a0df42"
-SearchNetworks = "17666995-d420-48ac-8d7c-8a155fef8e5d"
 UTCGP = "956831e1-0a7a-492a-ae16-058c6128a9f2"
 
 [compat]
