@@ -5,7 +5,7 @@ using Base.Threads
 # using InteractiveUtils
 # using BenchmarkTools
 import JSON
-
+using UnicodePlots
 using ErrorTypes
 # using HypothesisTests
 using Revise
@@ -17,7 +17,7 @@ using UTCGP: jsonTracker, save_json_tracker, repeatJsonTracker, jsonTestTracker
 using UTCGP: SN_writer, sn_strictphenotype_hasher
 using UTCGP: get_image2D_factory_bundles, SImageND, DataFrames
 # import SearchNetworks as sn
-# import DataStructures: OrderedDict
+using DataStructures
 using UUIDs
 # using Images, FileIO
 using ImageCore
@@ -31,7 +31,7 @@ using Random
 # using ImageView
 using StatsBase: kurtosis, variation, sample
 # using MLDatasets: CIFAR10
-using UTCGP: AbstractCallable, Population, RunConfGA, PopulationPrograms, IndividualPrograms, get_float_bundles, replace_shared_inputs!, evaluate_individual_programs
+using UTCGP: AbstractCallable, Population, RunConfGA, PopulationPrograms, IndividualPrograms, get_float_bundles, replace_shared_inputs!, evaluate_individual_programs, reset_programs!
 # using JuliaInterpreter
 # using Flux
 using Logging
@@ -40,14 +40,41 @@ using Logging
 # using ArgParse
 # import PNGFiles
 # using ThreadPinning
+
 using ArcadeLearningEnvironment
 using MAGE_ATARI
+using IOCapture
+
+@inline function relu(x)
+    x > 0 ? x : 0
+end
 
 dir = @__DIR__
 pwd_dir = pwd()
 
 file = @__FILE__
 home = dirname(dirname(file))
+
+PROB_ACTION = true
+FIX_STRUCTURE = true
+# GAME 
+GAME = "pong"
+_g = Game(GAME, 1)
+DOWNSCALE = true
+GRAYSCALE = true
+s = get_state_buffer(_g, GRAYSCALE)
+o = get_observation_buffer(_g, GRAYSCALE, DOWNSCALE)
+IMG_SIZE = o[1] |> size
+println("SCALE ($DOWNSCALE) SIZE : $(IMG_SIZE)")
+
+# o = get_observation_buffer(_g, GRAYSCALE, true)
+# IMG_SIZE_ = o[1] |> size
+# println("DOWNSCALED SIZE : $(IMG_SIZE_ )")
+
+IMAGE_TYPE = SImage2D{IMG_SIZE[1],IMG_SIZE[2],N0f8,Matrix{N0f8}}
+ACTIONS = getMinimalActionSet(_g.ale)
+@show ACTIONS
+ATARI_LOCK = ReentrantLock()
 
 # SEED 
 seed_ = 1
@@ -59,7 +86,6 @@ disable_logging(Logging.Debug)
 
 # HASH 
 hash = UUIDs.uuid4() |> string
-
 
 function evaluate_individual_programs!(
     ind_prog::IndividualPrograms,
@@ -84,32 +110,61 @@ function evaluate_individual_programs!(
 end
 
 # PARAMS --- --- 
-function atari_fitness(ind::IndividualPrograms, game::Game, model_arch::modelArchitecture, meta_library::MetaLibrary)
-    # Random.seed!(seed)
-    # mt = MersenneTwister(seed)
+function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitecture, meta_library::MetaLibrary)
+    global GAME
+    game = nothing
+    # IOCapture.capture() do
+    game = Game(GAME, 1, lck=ATARI_LOCK)
+    # end
+    Random.seed!(seed)
+    mt = MersenneTwister(seed)
     #game = Game(rom, seed, lck=lck)
-    reset!(game)
+    MAGE_ATARI.reset!(game)
     # reset!(reducer) # zero buffers
     grayscale = true
-    downscale = false
-    max_frames = 5000
+    downscale = true
+    max_frames = 10_000
     stickiness = 0.25
     s = get_state_buffer(game, grayscale)
     o = get_observation_buffer(game, grayscale, downscale)
     reward = 0.0
     frames = 0
     prev_action = Int32(0)
-    act(game.ale, 1)
+    q = Queue{IMAGE_TYPE}()
     while ~game_over(game.ale)
         # if rand(mt) > stickiness || frames == 0
-        if rand() > stickiness || frames == 0
+        if rand(mt) > stickiness || frames == 0
             get_state!(s, game, grayscale)
             get_observation!(o, s, game, grayscale, downscale)
-            o_copy = [SImageND(N0f8.(o[1] ./ 256.0))]
+            cur_frame = SImageND(N0f8.(o[1] ./ 256.0))
+            if isempty(q)
+                enqueue!(q, cur_frame)
+                enqueue!(q, cur_frame)
+                enqueue!(q, cur_frame)
+                enqueue!(q, cur_frame)
+            end
+            dequeue!(q) # removes the first
+            enqueue!(q, cur_frame) # adds to last
+            v = [i for i in q]
+            o_copy = [v[1],
+                v[2],
+                v[3],
+                v[4],
+                0.1, -0.1, 2.0, -2.0]
             outputs = evaluate_individual_programs!(ind, o_copy, model_arch, meta_library)
-            action = game.actions[argmax(outputs)]
-            # @show action
+            # @show outputs
+            if PROB_ACTION
+                os = relu.(outputs)
+                w = Weights(os)
+                action = sample(mt, game.actions, w)
+            else
+                action = game.actions[argmax(outputs)]
+            end
 
+            # @show action
+            # if rand(mt) < 0.01
+            #     action = Int32(1)
+            # end
         else
             action = prev_action
         end
@@ -121,9 +176,17 @@ function atari_fitness(ind::IndividualPrograms, game::Game, model_arch::modelArc
             break
         end
     end
-    #close!(game)
+    # close!(game)
+
+    # if reward < 0.0
+    #     r = reward
+    # else
+    #     r = reward * -1.0
+    # end
     @show reward
-    reward * -1.0
+    r = reward * -1.0
+    # @show r
+    r
 end
 
 struct AtariEndpoint <: UTCGP.BatchEndpoint
@@ -133,9 +196,25 @@ struct AtariEndpoint <: UTCGP.BatchEndpoint
         model_arch::modelArchitecture,
         meta_library::MetaLibrary
     )
-        g = Game("breakout", 1)
-        pop_res = Vector{Float64}(undef, length(pop))
-        pop_res .= [atari_fitness(ind_prog, g, model_arch, meta_library) for ind_prog in pop]
+        n = length(pop)
+        nt = nthreads()
+        indices = collect(1:n)
+        BS = ceil(Int, n / nt)
+        pop_res = Vector{Float64}(undef, n)
+        tasks = []
+        for ith_x in Iterators.partition(indices, BS)
+            t = @spawn begin
+                @info "Spawn the task of $ith_x to thread $(threadid())"
+                for i in ith_x
+                    pop_res[i] = atari_fitness(pop[i], 1, model_arch, meta_library)
+
+                end
+            end
+            push!(tasks, t)
+        end
+        results = fetch.(tasks)
+        @show results
+        @show pop_res
         return new(pop_res)
     end
 end
@@ -143,10 +222,10 @@ end
 
 ### RUN CONF ###
 
-n_elite = 3
-n_new = 10
+n_elite = 5
+n_new = 20
 gens = 100
-tour_size = 2
+tour_size = 3
 mut_rate = 1.1
 
 run_conf = RunConfGA(
@@ -154,13 +233,12 @@ run_conf = RunConfGA(
 )
 
 # Bundles Integer
-Type2Dimg = SImage2D{160,210,N0f8,Matrix{N0f8}}
-fallback() = SImageND(ones(N0f8, (160, 210)))
+fallback() = SImageND(ones(N0f8, (IMG_SIZE[1], IMG_SIZE[2])))
 image2D = get_image2D_factory_bundles()
 for factory_bundle in image2D
     for (i, wrapper) in enumerate(factory_bundle)
         try
-            fn = wrapper.fn(Type2Dimg) # specialize
+            fn = wrapper.fn(IMAGE_TYPE) # specialize
             wrapper.fallback = fallback
             # create a new wrapper in order to change the type
             factory_bundle.functions[i] =
@@ -176,7 +254,7 @@ float_bundles = get_float_bundles()
 # glcm_b = deepcopy(UTCGP.experimental_bundle_float_glcm_factory)
 # for (i, wrapper) in enumerate(glcm_b)
 #     # try
-#     fn = wrapper.fn(Type2Dimg) # specialize
+#     fn = wrapper.fn(IMAGE_TYPE) # specialize
 #     # wrapper.fallback = 
 #     # create a new wrapper in order to change the type
 #     glcm_b.functions[i] =
@@ -188,28 +266,31 @@ float_bundles = get_float_bundles()
 # push!(float_bundles, glcm_b)
 
 vector_float_bundles = UTCGP.get_listfloat_bundles()
+int_bundles = UTCGP.get_integer_bundles()
 
 # Libraries
 lib_image2D = Library(image2D)
 lib_float = Library(float_bundles)
+lib_int = Library(int_bundles)
 lib_vecfloat = Library(vector_float_bundles)
 
-# MetaLibrary
-ml = MetaLibrary([lib_image2D, lib_float, lib_vecfloat])
+# MetaLibrarylibfloat# ml = MetaLibrary([lib_image2D, lib_float, lib_vecfloat, lib_int])
+ml = MetaLibrary([lib_image2D, lib_float])
 
-offset_by = 1 # 0.1 0.2 1. -1.
+offset_by = 8 # 0.1 0.2 1. -1.
 
 ### Model Architecture ###
 model_arch = modelArchitecture(
-    [Type2Dimg],
-    [1],
-    [Type2Dimg, Float64, Vector{Float64}], # genome
-    [Float64, Float64, Float64, Float64], # outputs
-    [2, 2, 2, 2]
+    [IMAGE_TYPE, IMAGE_TYPE, IMAGE_TYPE, IMAGE_TYPE, Float64, Float64, Float64, Float64],
+    [1, 1, 1, 1, 2, 2, 2, 2],
+    # [IMAGE_TYPE, Float64, Vector{Float64}, Int], # genome
+    [IMAGE_TYPE, Float64], # genome
+    [Float64 for i in 1:length(ACTIONS)], # outputs
+    [2 for i in 1:length(ACTIONS)]
 )
 
 ### Node Config ###
-N_nodes = 30
+N_nodes = 20
 node_config = nodeConfig(N_nodes, 1, 3, offset_by)
 
 ### Make UT GENOME ###
@@ -284,6 +365,10 @@ fix_all_output_nodes!(ut_genome)
 #     write(jtga.tracker.file, JSON.json(s), "\n")
 # end
 
+if FIX_STRUCTURE
+    N_IMG = 10
+
+end
 ##########
 #   FIT  #
 ##########
@@ -417,6 +502,15 @@ function fit_ga_atari(
         elite_avg_fitness = mean(skipmissing(elite_fitnesses))
         elite_std_fitness = std(filter(!isnan, ind_performances))
         best_programs = population_programs[elite_idx]
+
+        reset_programs!.(best_programs)
+        # empty!(shared_inputs.inputs)
+        for p in best_programs
+            println("Best Prog")
+            replace_shared_inputs!(p, [0 for i in 1:offset_by])
+            println(p)
+        end
+
         # genome = deepcopy(population[elite_idx])
         try
             histogram(ind_performances) |> println

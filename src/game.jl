@@ -4,7 +4,7 @@
 using ArcadeLearningEnvironment
 using Colors
 using ImageCore
-# using ImageTransformations
+using ImageTransformations
 using Interpolations
 export
     Game,
@@ -41,6 +41,7 @@ function Game(romfile::String, seed::Int64; kwargs...)
     kwargs_dict = Dict(kwargs)
     if haskey(kwargs_dict, :lck)  # Thread safe
         lock(kwargs_dict[:lck]) do
+            @info "Loading holding lock "
             loadROM(ale, romfile)
         end
         # unlock(kwargs_dict[:lck])
@@ -113,8 +114,8 @@ function get_observation_buffer(game::Game, grayscale::Bool, downscale::Bool)
     n_obs = grayscale ? 1 : 3
     if downscale
         # (l+1)÷2 for odd l, and l÷2 + 1 for even l
-        w = isodd(game.width) ? (game.width + 1) ÷ 2 : game.width ÷ 2 + 1
-        h = isodd(game.height) ? (game.height + 1) ÷ 2 : game.height ÷ 2 + 1
+        w = isodd(game.width) ? (game.width + 1) ÷ 2 : game.width ÷ 2 #+ 1
+        h = isodd(game.height) ? (game.height + 1) ÷ 2 : game.height ÷ 2 #+ 1
         obs_size = (w, h)
     else
         obs_size = (game.width, game.height)
@@ -150,12 +151,26 @@ function get_observation!(
 )
     if grayscale
         if downscale
-            o .= [convert(Matrix{UInt8},
-                floor.(imresize(reshape(s, (game.width, game.height)),
-                    ratio=0.5, method=BSpline(Linear()))))]
-            #    convert(Matrix{UInt8},
-            #    imresize(reshape(s, (game.width, game.height)),
-            #    ratio=0.5, method=BSpline(Constant())))]
+            try
+                S = (game.width, game.height)
+                new_size = round.(Int, S .* 0.5)
+                o .= [convert(Matrix{UInt8},
+                    floor.(imresize(
+                        reshape(s, S),
+                        new_size,
+                        method=Linear())))]
+                # o .= [convert(Matrix{UInt8},
+                #     floor.(imresize(reshape(s, (game.width, game.height)),
+                #         ratio=0.49, method=Linear())))]
+                #    convert(Matrix{UInt8},
+                #    imresize(reshape(s, (game.width, game.height)),
+                #    ratio=0.5, method=BSpline(Constant())))]
+                # @assert size(o[1]) == (81, 106)
+            catch
+                if isdefined(Main, :Infiltrator)
+                    Main.infiltrate(@__MODULE__, Base.@locals, @__FILE__, @__LINE__)
+                end
+            end
         else
             o .= [reshape(s, (game.width, game.height))]
         end
