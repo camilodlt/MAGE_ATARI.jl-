@@ -40,7 +40,7 @@ using Logging
 # using ArgParse
 # import PNGFiles
 # using ThreadPinning
-
+using ImageView
 using ArcadeLearningEnvironment
 using MAGE_ATARI
 using IOCapture
@@ -71,11 +71,42 @@ println("SCALE ($DOWNSCALE) SIZE : $(IMG_SIZE)")
 # IMG_SIZE_ = o[1] |> size
 # println("DOWNSCALED SIZE : $(IMG_SIZE_ )")
 
+
 IMAGE_TYPE = SImage2D{IMG_SIZE[1],IMG_SIZE[2],N0f8,Matrix{N0f8}}
-ACTIONS = getMinimalActionSet(_g.ale)
-@show ACTIONS
+TRUE_ACTIONS = getMinimalActionSet(_g.ale)
+
 ATARI_LOCK = ReentrantLock()
 
+abstract type AbstractProb end
+struct prob <: AbstractProb end
+struct notprob <: AbstractProb end
+
+function pong_action_mapping(outputs::Vector, p::Type{notprob})
+    global ACTIONS
+    # if outputs[1] > 0.1
+    #     return 4
+    # elseif outputs[1] < -0.1
+    #     return 3
+    # end
+    # 2
+    ACTIONS[argmax(outputs)]
+end
+function pong_action_mapping(outputs::Vector, p::Type{prob}, mt)
+    global ACTIONS
+    os = relu.(outputs)
+    w = Weights(os)
+    action = sample(mt, ACTIONS, w)
+    action
+end
+
+action_mapping_dict = Dict(
+    "pong" => [3, pong_action_mapping]
+)
+
+NACTIONS = action_mapping_dict[GAME][1]
+ACTIONS = TRUE_ACTIONS[2:NACTIONS+1]
+ACTION_MAPPER = action_mapping_dict[GAME][2]
+@show ACTIONS
 # SEED 
 seed_ = 1
 @warn "Seed : $seed_"
@@ -123,7 +154,7 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
     # reset!(reducer) # zero buffers
     grayscale = true
     downscale = true
-    max_frames = 10_000
+    max_frames = 2000
     stickiness = 0.25
     s = get_state_buffer(game, grayscale)
     o = get_observation_buffer(game, grayscale, downscale)
@@ -137,6 +168,9 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
             get_state!(s, game, grayscale)
             get_observation!(o, s, game, grayscale, downscale)
             cur_frame = SImageND(N0f8.(o[1] ./ 256.0))
+            # if rand() > 0.999
+            # imshow(cur_frame)
+            # end
             if isempty(q)
                 enqueue!(q, cur_frame)
                 enqueue!(q, cur_frame)
@@ -153,14 +187,12 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
                 0.1, -0.1, 2.0, -2.0]
             outputs = evaluate_individual_programs!(ind, o_copy, model_arch, meta_library)
             # @show outputs
-            if PROB_ACTION
-                os = relu.(outputs)
-                w = Weights(os)
-                action = sample(mt, game.actions, w)
-            else
-                action = game.actions[argmax(outputs)]
-            end
 
+            if PROB_ACTION
+                action = ACTION_MAPPER(outputs, prob, mt)
+            else
+                action = ACTION_MAPPER(outputs, notprob)
+            end
             # @show action
             # if rand(mt) < 0.01
             #     action = Int32(1)
@@ -234,7 +266,7 @@ run_conf = RunConfGA(
 
 # Bundles Integer
 fallback() = SImageND(ones(N0f8, (IMG_SIZE[1], IMG_SIZE[2])))
-image2D = get_image2D_factory_bundles()
+image2D = UTCGP.get_image2D_factory_bundles_atari()
 for factory_bundle in image2D
     for (i, wrapper) in enumerate(factory_bundle)
         try
@@ -249,30 +281,15 @@ for factory_bundle in image2D
     end
 end
 
-float_bundles = get_float_bundles()
-# GLCM exp
-# glcm_b = deepcopy(UTCGP.experimental_bundle_float_glcm_factory)
-# for (i, wrapper) in enumerate(glcm_b)
-#     # try
-#     fn = wrapper.fn(IMAGE_TYPE) # specialize
-#     # wrapper.fallback = 
-#     # create a new wrapper in order to change the type
-#     glcm_b.functions[i] =
-#         UTCGP.FunctionWrapper(fn, wrapper.name, wrapper.caster, wrapper.fallback)
-
-#     # catch
-#     # end
-# end
-# push!(float_bundles, glcm_b)
-
-vector_float_bundles = UTCGP.get_listfloat_bundles()
-int_bundles = UTCGP.get_integer_bundles()
+float_bundles = UTCGP.get_float_bundles_atari()
+# vector_float_bundles = UTCGP.get_listfloat_bundles()
+# int_bundles = UTCGP.get_integer_bundles()
 
 # Libraries
 lib_image2D = Library(image2D)
 lib_float = Library(float_bundles)
-lib_int = Library(int_bundles)
-lib_vecfloat = Library(vector_float_bundles)
+# lib_int = Library(int_bundles)
+# lib_vecfloat = Library(vector_float_bundles)
 
 # MetaLibrarylibfloat# ml = MetaLibrary([lib_image2D, lib_float, lib_vecfloat, lib_int])
 ml = MetaLibrary([lib_image2D, lib_float])
@@ -285,8 +302,8 @@ model_arch = modelArchitecture(
     [1, 1, 1, 1, 2, 2, 2, 2],
     # [IMAGE_TYPE, Float64, Vector{Float64}, Int], # genome
     [IMAGE_TYPE, Float64], # genome
-    [Float64 for i in 1:length(ACTIONS)], # outputs
-    [2 for i in 1:length(ACTIONS)]
+    [Float64 for i in 1:NACTIONS], # outputs
+    [2 for i in 1:NACTIONS]
 )
 
 ### Node Config ###
