@@ -26,6 +26,7 @@ using ArcadeLearningEnvironment
 using MAGE_ATARI
 using Random
 using IOCapture
+using Plots
 
 @inline function relu(x)
     x > 0 ? x : 0
@@ -94,8 +95,8 @@ disable_logging(Logging.Debug)
 # HARCODED FUNCTIONS
 mask_between = UTCGP.experimental_image2D_mask.experimental_bundle_image2D_maskregion_factory[1].fn(typeof(_example))
 mask_vertical = UTCGP.experimental_image2D_mask.experimental_bundle_image2D_maskregion_factory[2].fn(typeof(_example))
-x_max = UTCGP.bundle_number_coordinatesFromImg[1].fn
-y_max = UTCGP.bundle_number_coordinatesFromImg[2].fn
+x_max = UTCGP.bundle_number_coordinatesFromImg[3].fn
+y_max = UTCGP.bundle_number_coordinatesFromImg[4].fn
 
 function top_mask(s)
     mask_vertical(s, 37, 193)
@@ -148,7 +149,7 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
     reward = 0.0
     frames = 0
     prev_action = Int32(0)
-    [MAGE_ATARI.step!(game, game.state, Int32(0)) for i in 1:60]
+    # [MAGE_ATARI.step!(game, game.state, Int32(0)) for i in 1:60]
     q = Queue{IMAGE_TYPE}()
     while ~game_over(game.ale)
         # if rand(mt) > stickiness || frames == 0
@@ -176,7 +177,15 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
             ball_x, ball_y = float_caster(x_max(center)), float_caster(y_max(center))
             right_x, right_y = float_caster(x_max(right)), float_caster(y_max(right))
             inputs = [ball_x, ball_y, right_x, right_y]
-            outputs = evaluate_individual_programs!(ind, inputs, model_arch, meta_library)
+            outputs = [0.0, 0.0, 0.0]
+            if ball_x > 0 && ball_y > right_y
+                outputs[3] += 1
+            elseif ball_x > 0 && ball_y < right_y
+                outputs[2] += 1
+            else
+                outputs[1] += 1
+            end
+            # outputs = evaluate_individual_programs!(ind, inputs, model_arch, meta_library)
             # @show outputs
 
             if PROB_ACTION
@@ -197,11 +206,11 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
         frames += 1
         prev_action = action
         if frames > max_frames
-            @info "Game finished because of max_frames"
+            # @info "Game finished because of max_frames"
             break
         end
     end
-    # close!(game)
+    MAGE_ATARI.close(game)
 
     # if reward < 0.0
     #     r = reward
@@ -247,8 +256,8 @@ end
 
 ### RUN CONF ###
 
-n_elite = 20
-n_new = 100
+n_elite = 1
+n_new = 1
 gens = 1000
 tour_size = 5
 mut_rate = 2.1
@@ -643,3 +652,70 @@ best_genome, best_programs, gen_trakcer = fit_ga_atari(
     nothing #repeat_metric_tracker # .. 
 )
 
+
+
+# MANUAL
+function manual_game(seed=1)
+    game = AtariEnv(GAME, 1, ATARI_LOCK)
+    # end
+    Random.seed!(seed)
+    mt = MersenneTwister(seed)
+    MAGE_ATARI.reset!(game)
+    max_frames = 500
+    stickiness = 0.25
+    reward = 0.0
+    frames = 0
+    prev_action = Int32(0)
+    # [MAGE_ATARI.step!(game, game.state, Int32(0)) for i in 1:60]
+    while ~game_over(game.ale)
+        if rand(mt) > stickiness || frames == 0
+            MAGE_ATARI.update_screen(game)
+            current_gray_screen = N0f8.(Gray.(game.screen))
+            cur_frame = SImageND(current_gray_screen)
+            c = top_mask(cur_frame)
+            center = center_mask(c)
+            right = right_mask(c)
+            ball_x, ball_y = float_caster(x_max(center)), float_caster(y_max(center))
+            right_x, right_y = float_caster(x_max(right)), float_caster(y_max(right))
+            inputs = [ball_x, ball_y, right_x, right_y]
+            outputs = [0.0, 0.0, 0.0]
+            if ball_x > 0 && ball_y > right_y
+                outputs[3] += 1
+            elseif ball_x > 0 && ball_y < right_y
+                outputs[2] += 1
+            else
+                outputs[1] += 1
+            end
+            # outputs = evaluate_individual_programs!(ind, inputs, model_arch, meta_library)
+            # @show outputs
+
+            if PROB_ACTION
+                action = ACTION_MAPPER(outputs, prob, mt)
+            else
+                action = ACTION_MAPPER(outputs, notprob)
+            end
+        else
+            action = prev_action
+        end
+        # reward += act(game.ale, action)
+        r, s = MAGE_ATARI.step!(game, game.state, action)
+        MAGE_ATARI.update_screen(game)
+        reward += r
+        frames += 1
+        prev_action = action
+
+        p = Plots.plot(game.screen)
+        Plots.annotate!(p, [(5, 10, "Frame : $frames \n Action : $action",)])
+        # display(p)
+        Plots.savefig(p, "images/$(lpad(frames, 6, '0')).png")
+        if frames > max_frames
+            # @info "Game finished because of max_frames"
+            break
+        end
+    end
+    MAGE_ATARI.close(game)
+end
+manual_game()
+img_dir = readdir("images")
+imgs = [load("images/" * img) for img in img_dir]
+save("manual_policy.gif", cat(imgs..., dims=3))
