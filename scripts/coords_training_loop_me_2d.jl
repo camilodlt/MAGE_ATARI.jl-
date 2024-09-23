@@ -28,7 +28,7 @@ using Random
 using IOCapture
 # using Plots
 
-RUN_FILE = "results/me_1.csv"
+RUN_FILE = "results/me_coords_1.csv"
 open(RUN_FILE, "a") do f
     write(f,join(["iteration", "best_fitness", "coverage"], ",")* "\n")  
 end
@@ -48,26 +48,19 @@ home = dirname(dirname(file))
 PROB_ACTION = true
 GAME = "pong"
 _g = AtariEnv(GAME, 1)
-
-# these two params do not count now
-DOWNSCALE = false
-GRAYSCALE = true
-
 MAGE_ATARI.update_state(_g)
 MAGE_ATARI.update_screen(_g)
 _example = SImageND(N0f8.(Gray.(_g.screen)))
 w, h = size(_g)
-# IMAGE_TYPE = SImage2D{w,h,N0f8,Matrix{N0f8}}
-IMAGE_TYPE = typeof(_example)
+IMAGE_TYPE = SImage2D{w,h,N0f8,Matrix{N0f8}}
 TRUE_ACTIONS = MAGE_ATARI.actions(_g, _g.state)
 ATARI_LOCK = ReentrantLock()
-IMG_SIZE = _example |> size
 
 abstract type AbstractProb end
 struct prob <: AbstractProb end
 struct notprob <: AbstractProb end
 
-function pong_deterministic_action_mapping(outputs::Vector, p::Type{notprob})
+function pong_action_mapping(outputs::Vector, p::Type{notprob})
     global ACTIONS
     # if outputs[1] > 0.1
     #     return 4
@@ -102,7 +95,28 @@ Random.seed!(seed_)
 disable_logging(Logging.Debug)
 
 # HASH 
-hash = UUIDs.uuid4() |> string
+# hash = UUIDs.uuid4() |> string
+
+
+# HARCODED FUNCTIONS
+mask_between = UTCGP.experimental_image2D_mask.experimental_bundle_image2D_maskregion_factory[1].fn(typeof(_example))
+mask_vertical = UTCGP.experimental_image2D_mask.experimental_bundle_image2D_maskregion_factory[2].fn(typeof(_example))
+x_max = UTCGP.bundle_number_coordinatesFromImg[1].fn
+y_max = UTCGP.bundle_number_coordinatesFromImg[2].fn
+
+function top_mask(s)
+    mask_vertical(s, 37, 193)
+end
+
+function center_mask(s)
+    mask_between(s, 26, 139)
+end
+function right_mask(s)
+    mask_between(s, 140, 1000)
+end
+function left_mask(s)
+    mask_between(s, 1, 25)
+end
 
 #
 function evaluate_individual_programs!(
@@ -139,7 +153,7 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
     #game = Game(rom, seed, lck=lck)
     MAGE_ATARI.reset!(game)
     # reset!(reducer) # zero buffers
-    max_frames = 10_000
+    max_frames = 10000
     stickiness = 0.25
     reward = 0.0
     frames = 0
@@ -148,27 +162,35 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
         [action => 0 for action in ACTIONS]...
     )
     action_changes = 0
-    q = Queue{IMAGE_TYPE}()
     while ~game_over(game.ale)
+        # if rand(mt) > stickiness || frames == 0
         if rand(mt) > stickiness || frames == 0
             MAGE_ATARI.update_screen(game)
             current_gray_screen = N0f8.(Gray.(game.screen))
             cur_frame = SImageND(current_gray_screen)
-            if isempty(q)
-                enqueue!(q, cur_frame)
-                enqueue!(q, cur_frame)
-                enqueue!(q, cur_frame)
-                enqueue!(q, cur_frame)
+            c = top_mask(cur_frame)
+            center = center_mask(c)
+            right = right_mask(c)
+            left = left_mask(c)
+            ball_x, ball_y = float_caster(x_max(center)), float_caster(y_max(center))
+            right_x, right_y = float_caster(x_max(right)), float_caster(y_max(right))
+            left_x, left_y = float_caster(x_max(left)), float_caster(y_max(left))
+            inputs = [ball_x, ball_y, right_x, right_y, left_x, left_y]
+            if sum(ismissing.(inputs)) > 0
+                if isdefined(Main, :Infiltrator)
+                    Main.infiltrate(@__MODULE__, Base.@locals, @__FILE__, @__LINE__)
+                end
+
             end
-            dequeue!(q) # removes the first
-            enqueue!(q, cur_frame) # adds to last
-            v = [i for i in q]
-            o_copy = [v[1],
-                v[2],
-                v[3],
-                v[4],
-                0.1, -0.1, 2.0, -2.0]
-            outputs = evaluate_individual_programs!(ind, o_copy, model_arch, meta_library)
+            # outputs = [0.0, 0.0, 0.0]
+            # if ball_x > 0 && ball_y > right_y
+            #     outputs[3] += 1
+            # elseif ball_x > 0 && ball_y < right_y
+            #     outputs[2] += 1
+            # else
+            #     outputs[1] += 1
+            # end
+            outputs = evaluate_individual_programs!(ind, inputs, model_arch, meta_library)
 
             if PROB_ACTION
                 action = ACTION_MAPPER(outputs, prob, mt)
@@ -192,9 +214,9 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
             # @info "Game finished because of max_frames"
             break
         end
+        # calculate the descriptor
     end
     MAGE_ATARI.close(game)
-    # calculate the descriptors
     tot = sum(values(actions_counter))
     action_tot = sum([actions_counter[a] for a in ACTIONS[2:end]])
     activity_descriptor = action_tot / tot
@@ -247,8 +269,9 @@ end
 ### RUN CONF ###
 centroids = collect(0:0.05:0.99) .+ 0.05 / 2
 centroids_grid = vec([[i,j] for i in centroids, j in centroids])
+centroids_v = map(i -> [i], centroids)
 sample_size = 50
-gens = 3000
+gens = 2000
 mut_rate = 2.1
 
 run_conf = UTCGP.RunConfME(
@@ -283,18 +306,18 @@ lib_float = Library(float_bundles)
 # lib_vecfloat = Library(vector_float_bundles)
 
 # MetaLibrarylibfloat# ml = MetaLibrary([lib_image2D, lib_float, lib_vecfloat, lib_int])
-ml = MetaLibrary([lib_image2D, lib_float])
+ml = MetaLibrary([lib_float])
 
-offset_by = 8 # 4 inputs and 4 constants - 0.1 0.2 1. -1.
+offset_by = 6 # 0.1 0.2 1. -1.
 
 ### Model Architecture ###
 model_arch = modelArchitecture(
-    [IMAGE_TYPE, IMAGE_TYPE, IMAGE_TYPE, IMAGE_TYPE, Float64, Float64, Float64, Float64],
-    [1, 1, 1, 1, 2, 2, 2, 2],
+    [Float64, Float64, Float64, Float64, Float64, Float64],
+    [1, 1, 1, 1, 1, 1],
     # [IMAGE_TYPE, Float64, Vector{Float64}, Int], # genome
-    [IMAGE_TYPE, Float64], # genome
+    [Float64], # genome
     [Float64 for i in 1:NACTIONS], # outputs
-    [2 for i in 1:NACTIONS]
+    [1 for i in 1:NACTIONS]
 )
 
 ### Node Config ###

@@ -144,7 +144,7 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
     #game = Game(rom, seed, lck=lck)
     MAGE_ATARI.reset!(game)
     # reset!(reducer) # zero buffers
-    max_frames = 2000
+    max_frames = 10_000
     stickiness = 0.25
     reward = 0.0
     frames = 0
@@ -254,7 +254,7 @@ end
 centroids = collect(0:0.05:0.99) .+ 0.05 / 2
 centroids_v = map(i -> [i], centroids)
 sample_size = 5
-gens = 1000
+gens = 2000
 mut_rate = 2.1
 
 run_conf = UTCGP.RunConfME(

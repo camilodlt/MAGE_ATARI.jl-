@@ -40,13 +40,18 @@ using Logging
 # using ArgParse
 # import PNGFiles
 # using ThreadPinning
-using ImageView
+# using ImageView
 using ArcadeLearningEnvironment
 using MAGE_ATARI
 using IOCapture
 
 @inline function relu(x)
     x > 0 ? x : 0
+end
+
+RUN_FILE = "results/ga_1.csv"
+open(RUN_FILE, "a") do f
+    write(f,join(["iteration", "best_fitness"], ",")* "\n")  
 end
 
 dir = @__DIR__
@@ -56,32 +61,27 @@ file = @__FILE__
 home = dirname(dirname(file))
 
 PROB_ACTION = true
-FIX_STRUCTURE = true
 # GAME 
 GAME = "pong"
 _g = Game(GAME, 1)
-DOWNSCALE = true
+# these two params do not count now
+DOWNSCALE = false
 GRAYSCALE = true
-s = get_state_buffer(_g, GRAYSCALE)
-o = get_observation_buffer(_g, GRAYSCALE, DOWNSCALE)
-IMG_SIZE = o[1] |> size
-println("SCALE ($DOWNSCALE) SIZE : $(IMG_SIZE)")
 
-# o = get_observation_buffer(_g, GRAYSCALE, true)
-# IMG_SIZE_ = o[1] |> size
-# println("DOWNSCALED SIZE : $(IMG_SIZE_ )")
-
-
-IMAGE_TYPE = SImage2D{IMG_SIZE[1],IMG_SIZE[2],N0f8,Matrix{N0f8}}
-TRUE_ACTIONS = getMinimalActionSet(_g.ale)
-
+MAGE_ATARI.update_state(_g)
+MAGE_ATARI.update_screen(_g)
+_example = SImageND(N0f8.(Gray.(_g.screen)))
+w, h = size(_g)
+IMAGE_TYPE = SImage2D{w,h,N0f8,Matrix{N0f8}}
+TRUE_ACTIONS = MAGE_ATARI.actions(_g, _g.state)
 ATARI_LOCK = ReentrantLock()
+
 
 abstract type AbstractProb end
 struct prob <: AbstractProb end
 struct notprob <: AbstractProb end
 
-function pong_action_mapping(outputs::Vector, p::Type{notprob})
+function pong_deterministic_action_mapping(outputs::Vector, p::Type{notprob})
     global ACTIONS
     # if outputs[1] > 0.1
     #     return 4
@@ -106,7 +106,7 @@ action_mapping_dict = Dict(
 NACTIONS = action_mapping_dict[GAME][1]
 ACTIONS = TRUE_ACTIONS[2:NACTIONS+1]
 ACTION_MAPPER = action_mapping_dict[GAME][2]
-@show ACTIONS
+# @show ACTIONS
 # SEED 
 seed_ = 1
 @warn "Seed : $seed_"
@@ -145,29 +145,26 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
     global GAME
     game = nothing
     # IOCapture.capture() do
-    game = Game(GAME, 1, lck=ATARI_LOCK)
+    game = AtariEnv(GAME, 1, lck=ATARI_LOCK)
     # end
     Random.seed!(seed)
     mt = MersenneTwister(seed)
     #game = Game(rom, seed, lck=lck)
     MAGE_ATARI.reset!(game)
     # reset!(reducer) # zero buffers
-    grayscale = true
-    downscale = true
-    max_frames = 2000
+    # grayscale = true
+    # downscale = true
+    max_frames = 10_000
     stickiness = 0.25
-    s = get_state_buffer(game, grayscale)
-    o = get_observation_buffer(game, grayscale, downscale)
     reward = 0.0
     frames = 0
     prev_action = Int32(0)
     q = Queue{IMAGE_TYPE}()
     while ~game_over(game.ale)
-        # if rand(mt) > stickiness || frames == 0
         if rand(mt) > stickiness || frames == 0
-            get_state!(s, game, grayscale)
-            get_observation!(o, s, game, grayscale, downscale)
-            cur_frame = SImageND(N0f8.(o[1] ./ 256.0))
+            MAGE_ATARI.update_screen(game)
+            current_gray_screen = N0f8.(Gray.(game.screen))
+            cur_frame = SImageND(current_gray_screen)
             # if rand() > 0.999
             # imshow(cur_frame)
             # end
@@ -200,22 +197,23 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
         else
             action = prev_action
         end
-        reward += act(game.ale, action)
+        r, s = MAGE_ATARI.step!(game, game.state, action)
+        reward += r
         frames += 1
         prev_action = action
         if frames > max_frames
-            @info "Game finished because of max_frames"
+            # @info "Game finished because of max_frames"
             break
         end
     end
-    # close!(game)
+    MAGE_ATARI.close(game)
 
     # if reward < 0.0
     #     r = reward
     # else
     #     r = reward * -1.0
     # end
-    @show reward
+    # @show reward
     r = reward * -1.0
     # @show r
     r
@@ -238,7 +236,7 @@ struct AtariEndpoint <: UTCGP.BatchEndpoint
             t = @spawn begin
                 @info "Spawn the task of $ith_x to thread $(threadid())"
                 for i in ith_x
-                    pop_res[i] = atari_fitness(pop[i], 1, model_arch, meta_library)
+                    pop_res[i] = atari_fitness(deepcopy(pop[i]), 1, model_arch, meta_library)
 
                 end
             end
@@ -254,10 +252,10 @@ end
 
 ### RUN CONF ###
 
-n_elite = 20
-n_new = 100
-gens = 1000
-tour_size = 5
+n_elite = 5
+n_new = 45
+gens = 2000
+tour_size = 3
 mut_rate = 2.1
 
 run_conf = RunConfGA(
@@ -294,7 +292,7 @@ lib_float = Library(float_bundles)
 # MetaLibrarylibfloat# ml = MetaLibrary([lib_image2D, lib_float, lib_vecfloat, lib_int])
 ml = MetaLibrary([lib_image2D, lib_float])
 
-offset_by = 8 # 0.1 0.2 1. -1.
+offset_by = 8 # 4 inputs and 4 constants - 0.1 0.2 1. -1.
 
 ### Model Architecture ###
 model_arch = modelArchitecture(
@@ -307,7 +305,7 @@ model_arch = modelArchitecture(
 )
 
 ### Node Config ###
-N_nodes = 30
+N_nodes = 15
 node_config = nodeConfig(N_nodes, 1, 3, offset_by)
 
 ### Make UT GENOME ###
@@ -382,14 +380,10 @@ fix_all_output_nodes!(ut_genome)
 #     write(jtga.tracker.file, JSON.json(s), "\n")
 # end
 
-if FIX_STRUCTURE
-    N_IMG = 10
-
-end
 ##########
 #   FIT  #
 ##########
-budget_stop = UTCGP.eval_budget_early_stop(10_000)
+budget_stop = UTCGP.eval_budget_early_stop(100_000)
 
 function fit_ga_atari(
     shared_inputs::SharedInput,
@@ -522,11 +516,11 @@ function fit_ga_atari(
 
         reset_programs!.(best_programs)
         # empty!(shared_inputs.inputs)
-        for p in best_programs
-            println("Best Prog")
-            replace_shared_inputs!(p, [0 for i in 1:offset_by])
-            println(p)
-        end
+        # for p in best_programs
+        #     println("Best Prog")
+        #     replace_shared_inputs!(p, [0 for i in 1:offset_by])
+        #     println(p)
+        # end
 
         # genome = deepcopy(population[elite_idx])
         try
@@ -540,6 +534,11 @@ function fit_ga_atari(
         empty!(population.pop)
         push!(population.pop, old_pop...)
         ind_performances = ind_performances[elite_idx]
+
+        # FIX: temporary file writing method
+        open(RUN_FILE, "a") do f
+            write(f, join(string.([iteration, minimum(ind_performances)]), ",") * "\n")  
+        end
 
         # EPOCH CALLBACK
         batch = []

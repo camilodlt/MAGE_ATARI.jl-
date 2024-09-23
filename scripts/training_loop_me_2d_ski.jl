@@ -28,7 +28,8 @@ using Random
 using IOCapture
 # using Plots
 
-RUN_FILE = "results/me_1.csv"
+# RUN_FILE = "results/skiing_me_1.csv"
+RUN_FILE = "results/freeway_me_1.csv"
 open(RUN_FILE, "a") do f
     write(f,join(["iteration", "best_fitness", "coverage"], ",")* "\n")  
 end
@@ -46,7 +47,8 @@ home = dirname(dirname(file))
 
 
 PROB_ACTION = true
-GAME = "pong"
+# GAME = "skiing"
+GAME = "freeway"
 _g = AtariEnv(GAME, 1)
 
 # these two params do not count now
@@ -84,15 +86,24 @@ function pong_action_mapping(outputs::Vector, p::Type{prob}, mt)
     action = sample(mt, ACTIONS, w)
     action
 end
+function skiing_action_mapping(outputs::Vector, p::Type{prob}, mt)
+    global ACTIONS
+    os = relu.(outputs)
+    w = Weights(os)
+    action = sample(mt, ACTIONS, w)
+    action
+end
 
 action_mapping_dict = Dict(
-    "pong" => [3, pong_action_mapping]
+    "pong" => [3, pong_action_mapping],
+    "skiing" => [3, skiing_action_mapping],
+    "freeway" => [3, skiing_action_mapping]
 )
 
 NACTIONS = action_mapping_dict[GAME][1]
-ACTIONS = TRUE_ACTIONS[2:NACTIONS+1]
+ACTIONS = GAME == "pong" ? TRUE_ACTIONS[2:NACTIONS+1] : TRUE_ACTIONS
 ACTION_MAPPER = action_mapping_dict[GAME][2]
-# @show ACTIONS
+@show ACTIONS
 # SEED 
 seed_ = 1
 @warn "Seed : $seed_"
@@ -139,7 +150,7 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
     #game = Game(rom, seed, lck=lck)
     MAGE_ATARI.reset!(game)
     # reset!(reducer) # zero buffers
-    max_frames = 10_000
+    max_frames = 18_000
     stickiness = 0.25
     reward = 0.0
     frames = 0
