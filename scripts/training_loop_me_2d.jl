@@ -239,8 +239,8 @@ end
 ### RUN CONF ###
 centroids = collect(0:0.05:0.99) .+ 0.05 / 2
 centroids_grid = vec([[i, j] for i in centroids, j in centroids])
-sample_size = 2
-gens = 1
+sample_size = 72
+gens = 1000
 mut_rate = 2.1
 
 run_conf = UTCGP.RunConfME(
