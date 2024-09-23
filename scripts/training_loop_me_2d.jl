@@ -240,7 +240,7 @@ end
 centroids = collect(0:0.05:0.99) .+ 0.05 / 2
 centroids_grid = vec([[i, j] for i in centroids, j in centroids])
 sample_size = 2
-gens = 2
+gens = 1
 mut_rate = 2.1
 
 run_conf = UTCGP.RunConfME(
@@ -418,13 +418,13 @@ best_genome, best_programs, gen_tracker = UTCGP.fit_me_atari_mt(
 
 # SAVE ALL 
 payload = Dict()
-payload["best_genome"] = best_genome
-payload["best_program"] = best_programs
-payload["gen_tracker"] = gen_tracker
-payload["shared_inputs"] = shared_inputs
-payload["ml"] = ml
-payload["run_conf"] = run_conf
-payload["node_config"] = node_config
+payload["best_genome"] = deepcopy(best_genome)
+payload["best_program"] = deepcopy(best_programs)
+payload["gen_tracker"] = deepcopy(gen_tracker)
+payload["shared_inputs"] = deepcopy(shared_inputs)
+payload["ml"] = deepcopy(ml)
+payload["run_conf"] = deepcopy(run_conf)
+payload["node_config"] = deepcopy(node_config)
 
 genome_path = joinpath(folder, "best_genome.pickle")
 open(genome_path, "w") do io
@@ -436,3 +436,67 @@ close(metric_tracker.file)
 @show hash
 @show genome_path
 @show atari_tracker.test_losses[end]
+
+# TO DESERIALIZE
+# using Logging
+# using Base.Threads
+# import JSON
+# using UnicodePlots
+# using ErrorTypes
+# using Revise
+# using Dates
+# using Infiltrator
+# using Debugger
+# using UTCGP
+# using UTCGP: jsonTracker, save_json_tracker, repeatJsonTracker, jsonTestTracker
+# using UTCGP: SN_writer, sn_strictphenotype_hasher
+# using UTCGP: get_image2D_factory_bundles, SImageND, DataFrames
+# using DataStructures
+# using UUIDs
+# using ImageCore
+# using Statistics
+# using StatsBase
+# using UTCGP: SImage2D, BatchEndpoint
+# using StatsBase: kurtosis, variation, sample
+# using UTCGP: AbstractCallable, Population, RunConfGA, PopulationPrograms, IndividualPrograms, get_float_bundles, replace_shared_inputs!, evaluate_individual_programs, reset_programs!
+# # using ImageView
+# using ArcadeLearningEnvironment
+# using MAGE_ATARI
+# using Random
+# using IOCapture
+# GAME = "pong"
+# _g = AtariEnv(GAME, 1)
+
+# # these two params do not count now
+# DOWNSCALE = false
+# GRAYSCALE = true
+
+# MAGE_ATARI.update_state(_g)
+# MAGE_ATARI.update_screen(_g)
+# _example = SImageND(N0f8.(Gray.(_g.screen)))
+# w, h = size(_g)
+# IMAGE_TYPE = typeof(_example)
+# IMG_SIZE = _example |> size
+# # Bundles Integer
+# fallback() = SImageND(ones(N0f8, (IMG_SIZE[1], IMG_SIZE[2])))
+# image2D = UTCGP.get_image2D_factory_bundles_atari()
+# for factory_bundle in image2D
+#     for (i, wrapper) in enumerate(factory_bundle)
+#         try
+#             fn = wrapper.fn(IMAGE_TYPE) # specialize
+#             wrapper.fallback = fallback
+#             # create a new wrapper in order to change the type
+#             factory_bundle.functions[i] =
+#                 UTCGP.FunctionWrapper(fn, wrapper.name, wrapper.caster, wrapper.fallback)
+
+#         catch
+#         end
+#     end
+# end
+
+# float_bundles = UTCGP.get_float_bundles_atari()
+
+# # Libraries
+# lib_image2D = Library(image2D)
+# lib_float = Library(float_bundles)
+# ml = MetaLibrary([lib_image2D, lib_float])
