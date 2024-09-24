@@ -1,2 +1,0 @@
-{"best_fitness":21.0,"iteration":1,"data":"Test","coverage":0.0050000000000000044}
-{"params":{"mutation_rate":2.1,"output_mutation_rate":0.1,"connection_temperature":1,"mutation":"ga_numbered_new_material_mutation_callback","output_node":"fixed","Correction":"true","n_nodes":15,"generations":1}}

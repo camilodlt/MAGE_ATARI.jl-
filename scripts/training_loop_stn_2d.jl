@@ -56,6 +56,23 @@ TRUE_ACTIONS = MAGE_ATARI.actions(_g, _g.state)
 ATARI_LOCK = ReentrantLock()
 IMG_SIZE = _example |> size
 
+# Fixed Episode
+function random_game(n::Int)
+    frames = []
+    _g = AtariEnv(GAME, 1)
+    for i in 1:n
+        MAGE_ATARI.update_state(_g)
+        action = rand(TRUE_ACTIONS)
+        r, s = MAGE_ATARI.step!(_g, _g.state, action)
+        MAGE_ATARI.update_state(_g)
+                    MAGE_ATARI.update_screen(game)
+
+        push!(frames, MAGE_ATARI.)
+    end
+    frames
+end
+# 
+
 abstract type AbstractProb end
 struct prob <: AbstractProb end
 struct notprob <: AbstractProb end
@@ -124,14 +141,14 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
     global GAME
     game = nothing
     # IOCapture.capture() do
-    game = AtariEnv(GAME, seed, ATARI_LOCK)
+    game = AtariEnv(GAME, 1, ATARI_LOCK)
     # end
     Random.seed!(seed)
     mt = MersenneTwister(seed)
     #game = Game(rom, seed, lck=lck)
     MAGE_ATARI.reset!(game)
     # reset!(reducer) # zero buffers
-    max_frames = 18_000
+    max_frames = 1000
     stickiness = 0.25
     reward = 0.0
     frames = 0
@@ -201,8 +218,7 @@ struct AtariMEEndpoint <: UTCGP.BatchEndpoint
     function AtariMEEndpoint(
         pop::PopulationPrograms,
         model_arch::modelArchitecture,
-        meta_library::MetaLibrary,
-        generation::Int
+        meta_library::MetaLibrary
     )
         n = length(pop)
         nt = nthreads()
@@ -215,7 +231,7 @@ struct AtariMEEndpoint <: UTCGP.BatchEndpoint
             t = @spawn begin
                 @info "Spawn the task of $ith_x to thread $(threadid())"
                 for i in ith_x
-                    f, d = atari_fitness(deepcopy(pop[i]), generation, model_arch, meta_library)
+                    f, d = atari_fitness(deepcopy(pop[i]), 1, model_arch, meta_library)
                     # @show f
                     # @show d
                     pop_res[i] = f
@@ -241,7 +257,7 @@ end
 centroids = collect(0:0.05:0.99) .+ 0.05 / 2
 centroids_grid = vec([[i, j] for i in centroids, j in centroids])
 sample_size = 36
-gens = 500
+gens = 30
 mut_rate = 2.1
 
 run_conf = UTCGP.RunConfME(
