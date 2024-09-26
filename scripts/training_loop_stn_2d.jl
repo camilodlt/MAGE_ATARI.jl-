@@ -28,6 +28,7 @@ using Random
 using IOCapture
 using ThreadPinning
 import SearchNetworks as sn
+using DBInterface
 
 println(threadinfo(color=false, slurm=true))
 pinthreads(:cores)
@@ -645,7 +646,7 @@ function (writer::SN_writer)(
     end
 
     # CHECKPOINT EVERY 10 its
-    if gen % 10 == 0
+    if gen % 1 == 0
         println("Manual DB Checkpoint at generation $gen")
         sn._execute_command(writer.con, "CHECKPOINT")
     end
@@ -680,7 +681,7 @@ UTCGP.fit_stn_atari_mt(
     nothing,
     # Epoch Callback
     # nothing, # (train_tracker, test_tracker), #[metric_tracker, test_tracker, sn_writer_callback],
-    (atari_tracker, checkpoit_10, sn_writer_callback),
+    (checkpoit_10, sn_writer_callback, atari_tracker),
     # Final callbacks ?
     nothing, #(:default_early_stop_callback,), # 
     nothing #repeat_metric_tracker # .. 
@@ -694,6 +695,9 @@ UTCGP.fit_stn_atari_mt(
 #     node_config)
 save_json_tracker(metric_tracker)
 close(metric_tracker.file)
+sn._execute_command(con, "CHECKPOINT")
+DBInterface.close!(con)
+close(con)
 
 # @show hash
 # @show atari_tracker.test_losses[end]
