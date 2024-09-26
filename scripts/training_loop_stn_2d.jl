@@ -20,12 +20,18 @@ using Statistics
 using StatsBase
 using UTCGP: SImage2D, BatchEndpoint
 using StatsBase: kurtosis, variation, sample
-using UTCGP: AbstractCallable, Population, RunConfGA, PopulationPrograms, IndividualPrograms, get_float_bundles, replace_shared_inputs!, evaluate_individual_programs, reset_programs!
+using UTCGP: AbstractCallable, Population, RunConfGA, PopulationPrograms, IndividualPrograms, get_float_bundles, replace_shared_inputs!, evaluate_individual_programs, reset_programs!, ParametersStandardEpoch
 # using ImageView
 using ArcadeLearningEnvironment
 using MAGE_ATARI
 using Random
 using IOCapture
+using ThreadPinning
+import SearchNetworks as sn
+
+println(threadinfo(color=false, slurm=true))
+pinthreads(:cores)
+println(threadinfo(color=false, slurm=true))
 
 @inline function relu(x)
     x > 0 ? x : 0
@@ -60,17 +66,38 @@ IMG_SIZE = _example |> size
 function random_game(n::Int)
     frames = []
     _g = AtariEnv(GAME, 1)
+    q = Queue{IMAGE_TYPE}()
+    MAGE_ATARI.update_state(_g)
+    MAGE_ATARI.update_screen(_g)
     for i in 1:n
-        MAGE_ATARI.update_state(_g)
+        current_gray_screen = N0f8.(Gray.(_g.screen))
+        cur_frame = SImageND(current_gray_screen)
+        if isempty(q)
+            enqueue!(q, cur_frame)
+            enqueue!(q, cur_frame)
+            enqueue!(q, cur_frame)
+            enqueue!(q, cur_frame)
+        end
+        dequeue!(q) # removes the first
+        enqueue!(q, cur_frame) # adds to last
+        v = [i for i in q]
+        o_copy = [v[1],
+            v[2],
+            v[3],
+            v[4],
+            0.1, -0.1, 2.0, -2.0]
+
         action = rand(TRUE_ACTIONS)
         r, s = MAGE_ATARI.step!(_g, _g.state, action)
         MAGE_ATARI.update_state(_g)
-                    MAGE_ATARI.update_screen(game)
-
-        push!(frames, MAGE_ATARI.)
+        MAGE_ATARI.update_screen(_g)
+        push!(frames, o_copy)
     end
     frames
 end
+
+random_frames = random_game(18_000)
+random_frames_subset = sample(random_frames, 200)
 # 
 
 abstract type AbstractProb end
@@ -137,18 +164,18 @@ function evaluate_individual_programs!(
 end
 
 # PARAMS --- --- 
-function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitecture, meta_library::MetaLibrary)
+function atari_fitness(ind::IndividualPrograms, seed::Int, model_arch::modelArchitecture, meta_library::MetaLibrary)
     global GAME
     game = nothing
     # IOCapture.capture() do
     game = AtariEnv(GAME, 1, ATARI_LOCK)
     # end
-    Random.seed!(seed)
-    mt = MersenneTwister(seed)
+    Random.seed!(1)
+    mt = MersenneTwister(1)
     #game = Game(rom, seed, lck=lck)
     MAGE_ATARI.reset!(game)
     # reset!(reducer) # zero buffers
-    max_frames = 1000
+    max_frames = 5000
     stickiness = 0.25
     reward = 0.0
     frames = 0
@@ -218,7 +245,8 @@ struct AtariMEEndpoint <: UTCGP.BatchEndpoint
     function AtariMEEndpoint(
         pop::PopulationPrograms,
         model_arch::modelArchitecture,
-        meta_library::MetaLibrary
+        meta_library::MetaLibrary,
+        iteration::Int
     )
         n = length(pop)
         nt = nthreads()
@@ -227,11 +255,12 @@ struct AtariMEEndpoint <: UTCGP.BatchEndpoint
         pop_res = Vector{Float64}(undef, n)
         pop_descriptor = Vector{Vector{Float64}}(undef, n)
         tasks = []
+        previous_rand = copy(Random.default_rng())
         for ith_x in Iterators.partition(indices, BS)
             t = @spawn begin
                 @info "Spawn the task of $ith_x to thread $(threadid())"
                 for i in ith_x
-                    f, d = atari_fitness(deepcopy(pop[i]), 1, model_arch, meta_library)
+                    f, d = atari_fitness(deepcopy(pop[i]), iteration, model_arch, meta_library)
                     # @show f
                     # @show d
                     pop_res[i] = f
@@ -241,6 +270,7 @@ struct AtariMEEndpoint <: UTCGP.BatchEndpoint
             end
             push!(tasks, t)
         end
+        copy!(Random.default_rng(), previous_rand)
         results = fetch.(tasks)
         # @show results
         # @show pop_res
@@ -256,12 +286,13 @@ end
 ### RUN CONF ###
 centroids = collect(0:0.05:0.99) .+ 0.05 / 2
 centroids_grid = vec([[i, j] for i in centroids, j in centroids])
-sample_size = 36
-gens = 30
-mut_rate = 2.1
+sample_size = 10
+gens = 300
+mut_rate = 3.0
 
-run_conf = UTCGP.RunConfME(
-    centroids_grid, sample_size, mut_rate, 0.1, gens
+run_conf = UTCGP.RunConfSTN(
+    sample_size, "behavior_hash", "serialization_hash",
+    mut_rate, 0.1, gens
 )
 
 # Bundles Integer
@@ -373,28 +404,15 @@ f = open(metrics_path, "a", lock=true)
 metric_tracker = UTCGP.jsonTracker(h_params, f)
 atari_tracker = jsonTrackerME(metric_tracker, "Test", [])
 
-function (jtga::jsonTrackerME)(ind_performances,
-    rep,
-    population,
-    generation,
-    run_config,
-    model_architecture,
-    node_config,
-    meta_library,
-    shared_inputs,
-    programs,
-    best_loss,
-    best_program,
-    elite_idx,
-    Batch)
-    best_f = UTCGP.best_fitness(rep)
-    @warn "JTT $(jtga.label) Fitness : $best_f"
-    s = Dict("data" => jtga.label, "iteration" => generation,
-        "coverage" => UTCGP.coverage(rep), "best_fitness" => best_f)
+function (jtga::jsonTrackerME)(args::UTCGP.STN_EPOCH_ARGS)
+    # best_f = UTCGP.best_fitness(rep)
+    # @warn "JTT $(jtga.label) Fitness : $best_f"
+    # s = Dict("data" => jtga.label, "iteration" => generation,
+    #     "coverage" => UTCGP.coverage(rep), "best_fitness" => best_f)
 
-    push!(jtga.test_losses, best_f)
-    write(jtga.tracker.file, JSON.json(s), "\n")
-    flush(jtga.tracker.file)
+    # push!(jtga.test_losses, best_f)
+    # write(jtga.tracker.file, JSON.json(s), "\n")
+    # flush(jtga.tracker.file)
 end
 
 # CHECKPOINT
@@ -421,42 +439,221 @@ struct checkpoint <: UTCGP.AbstractCallable
     every::Int
 end
 
-function (c::checkpoint)(ind_performances,
-    rep,
-    population,
-    generation,
-    run_config,
-    model_architecture,
-    node_config,
-    meta_library,
-    shared_inputs,
-    programs,
-    best_loss,
-    best_program,
-    elite_idx,
-    Batch)
+function (c::checkpoint)(args::UTCGP.STN_EPOCH_ARGS)
+    # if generation % c.every == 0
+    #     best_individual = UTCGP.best_individual(rep)
+    #     best_program = UTCGP.decode_with_output_nodes(
+    #         best_individual,
+    #         meta_library,
+    #         model_architecture,
+    #         shared_inputs,
+    #     )
+    #     save_payload(best_individual, best_program,
+    #         nothing, shared_inputs,
+    #         meta_library, run_config,
+    #         node_config, "checkpoint_$generation.pickle")
 
-    if generation % c.every == 0
-        best_individual = UTCGP.best_individual(rep)
-        best_program = UTCGP.decode_with_output_nodes(
-            best_individual,
-            meta_library,
-            model_architecture,
-            shared_inputs,
-        )
-        save_payload(best_individual, best_program,
-            nothing, shared_inputs,
-            meta_library, run_config,
-            node_config, "checkpoint_$generation.pickle")
-
-    end
+    # end
 end
 checkpoit_10 = checkpoint(10)
+
+##############
+#    STN     #
+##############
+db_name = hash * ".db"
+db_folder = joinpath(folder, "db")
+db_path = joinpath(db_folder, db_name)
+isdir(db_folder) || mkdir(db_folder)
+con = sn.create_DB(db_path)
+sn.create_SN_tables!(
+    con,
+    extra_nodes_cols=OrderedDict(
+        "gen_hash" => sn.SN_col_type(string=true),
+        "phen_hash" => sn.SN_col_type(string=true),
+        "behavior_hash" => sn.SN_col_type(string=true),
+        "serialization_hash" => sn.SN_col_type(string=true),
+        "db_name" => sn.SN_col_type(string=true),
+    ),
+    extra_edges_cols=OrderedDict(
+        "fitness" => sn.SN_col_type(float=true),
+        # "is_elite" => sn.SN_col_type(float=true),
+        "db_name" => sn.SN_col_type(string=true),
+        "conf_name" => sn.SN_col_type(string=true),
+    )
+)
+
+struct sn_atari_behavior_hasher <: UTCGP.Abstract_Node_Hash_Function
+    semantic_examples::Vector
+    seed::Int
+end
+
+"""
+Plays a fixed game for each individual. 
+The outputs from each individual are hashed.
+"""
+function (s::sn_atari_behavior_hasher)(args::ParametersStandardEpoch)
+    pop = args.programs
+    semantic_hashes = Vector{String}(undef, length(pop))
+    previous_rand = copy(Random.default_rng())
+    for (i, ind) in enumerate(pop)
+        Random.seed!(s.seed)
+        mt = MersenneTwister(s.seed)
+        actions = []
+        for semantic_example in s.semantic_examples
+            outputs = evaluate_individual_programs!(ind, semantic_example, args.model_architecture, args.meta_library)
+            if PROB_ACTION
+                action = ACTION_MAPPER(outputs, prob, mt)
+            else
+                action = ACTION_MAPPER(outputs, notprob)
+            end
+            push!(actions, action)
+        end
+        ind_semantics = UTCGP.general_hasher_sha(identity.(actions))
+        semantic_hashes[i] = ind_semantics
+    end
+    copy!(Random.default_rng(), previous_rand)
+    semantic_hashes
+end
+
+"""
+Serializes the genome to be able to recover it later.
+"""
+struct sn_serialization_hasher <: UTCGP.Abstract_Node_Hash_Function end
+function (::sn_serialization_hasher)(p::ParametersStandardEpoch)
+    [UTCGP.serialize_ind_to_string(ind) for ind in p.population]
+end
+
+sn_writer_callback = SN_writer(
+    con,
+    all_edges(),
+    OrderedDict(
+        "gen_hash" => sn_genotype_hasher(),
+        "phen_hash" => sn_strictphenotype_hasher(),
+        "behavior_hash" => sn_atari_behavior_hasher(random_frames_subset, 1),
+        "serialization_hash" => sn_serialization_hasher(),
+        "db_name" => sn_db_name_node(db_name)
+    ),
+    OrderedDict(
+        "fitness" => sn_fitness_hasher(),
+        # "is_elite" => sn_elite_hasher(),
+        "db_name" => sn_db_name_edge(db_name),
+        "conf_name" => sn_db_name_edge(GAME)
+    )
+)
+
+"""
+The instantiated SN_writer writes : 
+- The nodes 
+- The edges between the parent and all the children
+
+Hashes will depend on which hashers where passed to the SN_writer during initialization. 
+
+All individuals are hashed with those hashers. 
+
+Edges happen between the `id_hash` of the parent and that of every child. 
+Extra cols for the EDGE table depend on the `edges_prop_getters` of the struct. 
+
+Note: `id_hash` is the hash of the union of all extra hashes. 
+"""
+function (writer::SN_writer)(
+    epoch_args::UTCGP.STN_EPOCH_ARGS
+    # ind_performances::Union{Vector{<:Number},Vector{Vector{<:Number}}},
+    # population::Population,
+    # generation::Int,
+    # run_config::runConf,
+    # model_architecture::modelArchitecture,
+    # node_config::nodeConfig,
+    # meta_library::MetaLibrary,
+    # shared_inputs::SharedInput,
+    # programs::PopulationPrograms,
+    # edges_indices_fn::Abstract_Edge_Prop_Getter,
+    # best_loss::Float64,
+    # best_program::IndividualPrograms,
+    # elite_idx::Int,
+)
+    epoch_params = UTCGP.ParametersStandardEpoch(
+        epoch_args.ind_performances,
+        epoch_args.population,
+        epoch_args.generation,
+        epoch_args.run_config,
+        epoch_args.model_architecture,
+        epoch_args.node_config,
+        epoch_args.meta_library,
+        epoch_args.shared_inputs,
+        epoch_args.programs,
+        minimum(epoch_args.ind_performances),#epoch_args.best_loss,
+        epoch_args.programs[1],#epoch_args.best_program,
+        1,#epoch_args.elite_idx,
+        Dict("mappings" => epoch_args.mappings)
+    )
+
+    gen = epoch_args.generation
+    # Hash all individuals (NODES)
+    all_hash_rows = UTCGP._get_rows_by_running_all_fns(epoch_params, writer, sn.Abstract_Nodes)
+    UTCGP._log_n_rows_view(all_hash_rows, sn.Abstract_Nodes)
+
+    # Get Info for all edges (EDGES)
+    indices_for_edges = writer.edges_indices_fn(epoch_params)
+    all_edges_info = UTCGP._get_rows_by_running_all_fns(epoch_params, writer, sn.Abstract_Edges)
+    UTCGP._log_n_rows_view(all_edges_info, sn.Abstract_Edges)
+    @assert length(indices_for_edges) == length(all_edges_info) "Mismatch between the number of edges rows and the indices of those edges : $(all_edges_info) vs $(indices_for_edges )"
+
+    # write Nodes to DB
+    r = sn.write_only_new_to_nodes!(writer.con, identity.(all_hash_rows))
+    @assert r == 0 "DB result is 1, so writing failed"
+
+    # Write Edges if any
+    # p_hash = all_hash_rows[end]["id_hash"] # pick the parent
+    for (ith_child, child, mutable_map) in zip(indices_for_edges, all_edges_info, epoch_args.mappings)
+        if epoch_args.generation == 1
+            # The edge does not have a parent 
+            @info "'First Iteration makes an edge between the individual and itself"
+            @debug "Edge from parent => $ith_child"
+            _to = all_hash_rows[ith_child]["id_hash"] # ⚠ The ith child has to match with the length of the hashed rows. # make a fn that verif this ? # TODO
+            r = sn.write_to_edges!(
+                writer.con,
+                OrderedDict(
+                    "_from" => _to,
+                    "_to" => _to,
+                    "iteration" => gen,
+                    child...,
+                ),
+            )
+            @assert r == 0 "DB result is 1, so writing edge failed"
+        else
+            p_hash = mutable_map.first # retrieved from DB so its correct
+            @debug "Edge from parent => $ith_child"
+            _to = all_hash_rows[ith_child]["id_hash"] # Calculated on the fly. ⚠ The ith child has to match with the length of the hashed rows. # make a fn that verif this ? # TODO
+            mutable_map.second = _to # update the mappings
+
+            r = sn.write_to_edges!(
+                writer.con,
+                OrderedDict(
+                    "_from" => p_hash,
+                    "_to" => _to,
+                    "iteration" => gen,
+                    child...,
+                ),
+            )
+            @assert r == 0 "DB result is 1, so writing edge failed"
+        end
+    end
+
+    # CHECKPOINT EVERY 10 its
+    if gen % 10 == 0
+        println("Manual DB Checkpoint at generation $gen")
+        sn._execute_command(writer.con, "CHECKPOINT")
+    end
+    #
+end
+
 ##########
 #   FIT  #
 ##########
 
-best_genome, best_programs, gen_tracker = UTCGP.fit_me_atari_mt(
+# best_genome, best_programs, gen_tracker = UTCGP.fit_stn_atari_mt(
+UTCGP.fit_stn_atari_mt(
+    con,
     shared_inputs,
     ut_genome,
     model_arch,
@@ -466,10 +663,10 @@ best_genome, best_programs, gen_tracker = UTCGP.fit_me_atari_mt(
     # Callbacks before training
     nothing,
     # Callbacks before step
-    (UTCGP.me_population_callback,),
-    (UTCGP.me_numbered_new_material_mutation_callback,),
+    (UTCGP.stn_population_callback,),
+    (UTCGP.stn_numbered_new_material_mutation_callback,),
     (:ga_output_mutation_callback,),
-    (UTCGP.me_decoding_callback,),
+    (UTCGP.stn_decoding_callback,),
     # Endpoints
     AtariMEEndpoint,
     # STEP CALLBACK
@@ -478,7 +675,7 @@ best_genome, best_programs, gen_tracker = UTCGP.fit_me_atari_mt(
     nothing,
     # Epoch Callback
     # nothing, # (train_tracker, test_tracker), #[metric_tracker, test_tracker, sn_writer_callback],
-    (atari_tracker, checkpoit_10),
+    (atari_tracker, checkpoit_10, sn_writer_callback),
     # Final callbacks ?
     nothing, #(:default_early_stop_callback,), # 
     nothing #repeat_metric_tracker # .. 
@@ -486,15 +683,15 @@ best_genome, best_programs, gen_tracker = UTCGP.fit_me_atari_mt(
 
 # SAVE ALL 
 
-save_payload(best_genome, best_programs,
-    gen_tracker, shared_inputs,
-    ml, run_conf,
-    node_config)
-save_json_tracker(metric_tracker)
-close(metric_tracker.file)
+# save_payload(best_genome, best_programs,
+#     gen_tracker, shared_inputs,
+#     ml, run_conf,
+#     node_config)
+# save_json_tracker(metric_tracker)
+# close(metric_tracker.file)
 
-@show hash
-@show atari_tracker.test_losses[end]
+# @show hash
+# @show atari_tracker.test_losses[end]
 
 # TO DESERIALIZE
 # using Logging
