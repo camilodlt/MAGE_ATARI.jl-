@@ -97,7 +97,7 @@ function random_game(n::Int)
 end
 
 random_frames = random_game(18_000)
-random_frames_subset = sample(random_frames, 200)
+random_frames_subset = sample(random_frames, 1000)
 # 
 
 abstract type AbstractProb end
@@ -175,7 +175,7 @@ function atari_fitness(ind::IndividualPrograms, seed::Int, model_arch::modelArch
     #game = Game(rom, seed, lck=lck)
     MAGE_ATARI.reset!(game)
     # reset!(reducer) # zero buffers
-    max_frames = 5000
+    max_frames = 10_000
     stickiness = 0.25
     reward = 0.0
     frames = 0
@@ -286,9 +286,9 @@ end
 ### RUN CONF ###
 centroids = collect(0:0.05:0.99) .+ 0.05 / 2
 centroids_grid = vec([[i, j] for i in centroids, j in centroids])
-sample_size = 10
-gens = 300
-mut_rate = 3.0
+sample_size = 36
+gens = 2000
+mut_rate = 2.0
 
 run_conf = UTCGP.RunConfSTN(
     sample_size, "behavior_hash", "serialization_hash",
@@ -405,14 +405,19 @@ metric_tracker = UTCGP.jsonTracker(h_params, f)
 atari_tracker = jsonTrackerME(metric_tracker, "Test", [])
 
 function (jtga::jsonTrackerME)(args::UTCGP.STN_EPOCH_ARGS)
-    # best_f = UTCGP.best_fitness(rep)
-    # @warn "JTT $(jtga.label) Fitness : $best_f"
-    # s = Dict("data" => jtga.label, "iteration" => generation,
-    #     "coverage" => UTCGP.coverage(rep), "best_fitness" => best_f)
+    best_f = collect(sn._execute_command(
+        con,
+        """
+        SELECT MIN(fitness) AS highest_fitness
+        FROM EDGES;
+        """,
+    ))[1][1]
 
-    # push!(jtga.test_losses, best_f)
-    # write(jtga.tracker.file, JSON.json(s), "\n")
-    # flush(jtga.tracker.file)
+    @warn "JTT $(jtga.label) Fitness : $best_f"
+    s = Dict("data" => jtga.label, "iteration" => args.generation, "best_fitness" => best_f)
+    push!(jtga.test_losses, best_f)
+    write(jtga.tracker.file, JSON.json(s), "\n")
+    flush(jtga.tracker.file)
 end
 
 # CHECKPOINT
@@ -687,8 +692,8 @@ UTCGP.fit_stn_atari_mt(
 #     gen_tracker, shared_inputs,
 #     ml, run_conf,
 #     node_config)
-# save_json_tracker(metric_tracker)
-# close(metric_tracker.file)
+save_json_tracker(metric_tracker)
+close(metric_tracker.file)
 
 # @show hash
 # @show atari_tracker.test_losses[end]
