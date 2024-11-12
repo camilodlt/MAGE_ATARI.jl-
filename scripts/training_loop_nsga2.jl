@@ -26,6 +26,7 @@ using ArcadeLearningEnvironment
 using MAGE_ATARI
 using Random
 using IOCapture
+using LinearAlgebra
 
 @inline function relu(x)
     x > 0 ? x : 0
@@ -62,6 +63,15 @@ IMG_SIZE = _example |> size
 abstract type AbstractProb end
 struct prob <: AbstractProb end
 struct notprob <: AbstractProb end
+
+function protected_norm(x::Vector{Float64})
+    nrm = norm(x)
+    if nrm > 0
+        return nrm
+    else
+        return 1.
+    end
+end
 
 function pong_action_mapping(outputs::Vector, p::Type{notprob})
     global ACTIONS
@@ -155,7 +165,7 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
     MAGE_ATARI.reset!(game)
     # reset!(reducer) # zero buffers
     # TODO just for debugging purposes, reset to 18_000
-    max_frames = 1_000
+    max_frames = 10_000
     stickiness = 0.25
     reward = 0.0
     frames = 0
@@ -164,6 +174,7 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
         [action => 0 for action in ACTIONS]...
     )
     action_changes = 0
+    output_sequence = Vector{Vector{Float64}}(undef, 0)
     q = Queue{IMAGE_TYPE}()
     while ~game_over(game.ale)
         if rand(mt) > stickiness || frames == 0
@@ -185,6 +196,7 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
                 v[4],
                 0.1, -0.1, 2.0, -2.0]
             outputs = evaluate_individual_programs!(ind, o_copy, model_arch, meta_library)
+            push!(output_sequence, outputs)
             
             # action = ACTION_MAPPER(outputs)
             if PROB_ACTION
@@ -216,10 +228,15 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
     action_tot = sum([actions_counter[a] for a in ACTIONS[2:end]])
     activity_descriptor = action_tot / tot
     action_changes_descriptor = action_changes / tot
-    r = reward * -1.0
-    # TODO this is a placeholder fake second objective
-    fake_second_objective = 1.
-    return [r, fake_second_objective]
+    first_objective = reward * -1.0
+
+    # TODO minimize the inverse of the average variance of image to float fns in the graph (variance over the episode = game) 
+    # for now we maximize the variance of each output over the episode
+    # note: we first divide the vector by its norm to ensure coherence across the values
+    transposed_output_signals = [[v[i] for v in output_sequence] for i=1:length(output_sequence[1])]
+    variances = [var(v/protected_norm(v)) for v in transposed_output_signals]
+    second_objective = - mean(variances)
+    return [first_objective, second_objective]
 end
 
 struct AtariNSGA2Endpoint <: UTCGP.BatchEndpoint
@@ -261,10 +278,10 @@ end
 
 
 ### RUN CONF ###
-pop_size = 10
+pop_size = 48
 tour_size = 3
-gens = 500
-mut_rate = 6.1
+gens = 4_000
+mut_rate = 3.1
 output_mut_rate = 0.1
 
 run_conf = UTCGP.RunConfNSGA2(
