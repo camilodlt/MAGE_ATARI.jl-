@@ -236,6 +236,9 @@ function atari_fitness(ind::IndividualPrograms, seed, model_arch::modelArchitect
     transposed_output_signals = [[v[i] for v in output_sequence] for i=1:length(output_sequence[1])]
     variances = [var(v/protected_norm(v)) for v in transposed_output_signals]
     second_objective = - mean(variances)
+    if isnan(second_objective)
+        second_objective = 0.
+    end
     return [first_objective, second_objective]
 end
 
